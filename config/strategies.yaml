@@ -1,0 +1,31 @@
+﻿default:
+  name: "Aggressive-TA-lean"
+  mode: live                      # live|paper|backtest (paper/live share same logic; PAPER_TRADING=true still controls execution)
+  timeframe: H1
+  symbols: ["XAGUSD","EURUSD","AUDCHF","USDJPY"]   # keep in sync with instruments.yaml shown in MT5
+
+  # --- agent weights (sum doesn’t need to be 1.0) ---
+  weights:
+    technical: 0.55
+    fundamental: 0.25
+    sentiment: 0.20
+
+  # --- decision policy ---
+  aggregation:
+    method: weighted              # weighted | majority
+    min_confidence: 0.55          # lower than before to allow more trades
+    action_threshold: 0.05        # net score above +0.05 = buy, below -0.05 = sell, else hold
+
+  # Optional guardrails to still be safe
+  risk:
+    max_positions: 5
+    max_daily_loss_pct: 5
+    kill_switch: false
+    block_near_news: true         # if your Sentiment agent flags high-impact news in next N hours
+    news_block_hours: 1
+
+  execution:
+    lot: 0.01
+    sl_pips: 180                  # set if you want auto-SL/TP; 0 disables
+    tp_pips: 360
+    allow_flip: false             # don’t reverse immediately if signal flips

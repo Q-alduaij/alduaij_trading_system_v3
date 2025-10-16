@@ -1,0 +1,25 @@
+﻿# config/instruments.yaml
+instruments:
+  - symbol: AUDUSD
+    broker: MT5
+    enabled: true
+    lot_size: 0.01
+    timeframe: M1
+
+  - symbol: AUDJPY
+    broker: MT5
+    enabled: true
+    lot_size: 0.01
+    timeframe: M1
+
+  - symbol: USDJPY
+    broker: MT5
+    enabled: true
+    lot_size: 0.01
+    timeframe: M1
+
+  - symbol: XAGUSD
+    broker: MT5
+    enabled: true
+    lot_size: 0.01
+    timeframe: M1

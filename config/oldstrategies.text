@@ -1,0 +1,24 @@
+﻿strategy:
+  name: example_momentum
+  timeframe: 60  # minutes
+  indicators:
+    - name: sma
+      period: 50
+    - name: rsi
+      period: 14
+
+risk:
+  risk_per_trade_pct: 1.0
+  max_daily_loss_pct: 5.0
+  max_positions: 5
+  max_drawdown_pct: 10.0
+
+execution:
+  slippage: 0.5
+  order_type: market
+
+aggregation:
+  method: majority
+  require_votes: 2        # 2-of-3 is enough
+  min_confidence: 0.6
+
