@@ -1,0 +1,131 @@
+*** Begin Patch
+*** Add File: main.py
++#!/usr/bin/env python3
++"""
++Lolo Trading Agent — minimal runtime entrypoint (paper-safe).
++
++What it does:
++  1) Loads .env (if present).
++  2) Validates config & YAMLs.
++  3) Ensures SQLite schema exists.
++  4) Optional: --health     => runs API key health check and exits.
++  5) Default: --demo        => runs a synthetic backtest via backtesting.simple_runner (offline).
++
++Live trading is intentionally NOT wired here. You must implement/plug your
++execution loop separately and guard it behind explicit flags.
++"""
++from __future__ import annotations
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta
++
++try:
++    from dotenv import load_dotenv
++except Exception:
++    # keep running if dotenv is not installed; env can still come from shell
++    def load_dotenv() -> None:
++        return None
++
++
++def run_health_check() -> int:
++    try:
++        from tools import api_key_health_check as hk
++    except Exception as e:
++        print(f"[health] cannot import health checker: {e}")
++        return 2
++    try:
++        hk.main()  # exits with sys.exit
++    except SystemExit as se:
++        return int(se.code or 0)
++    return 0
++
++
++def ensure_db():
++    try:
++        from utils import db_init
++        db_init.ensure_db()
++    except Exception as e:
++        print(f"[db] initialization failed: {e}")
++        sys.exit(2)
++
++
++def validate_config():
++    try:
++        from utils import config_validate
++        rc = config_validate.main()
++        if rc != 0:
++            print("[config] invalid; aborting.")
++            sys.exit(rc)
++    except SystemExit as se:
++        raise
++    except Exception as e:
++        print(f"[config] validation error: {e}")
++        sys.exit(2)
++
++
++def make_sinewave_ohlcv(n=500, start=100.0):
++    import pandas as pd
++    import numpy as np
++    rng = np.random.default_rng(7)
++    ts0 = datetime(2024, 1, 1)
++    ts = [ts0 + timedelta(minutes=i) for i in range(n)]
++    base = start + 2.0 * np.sin(np.linspace(0, 25, n)) + rng.normal(0, 0.3, n).cumsum() * 0.01
++    close = np.maximum(0.1, base)
++    open_ = close * (1 + rng.normal(0, 0.0005, n))
++    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.0008, n)))
++    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.0008, n)))
++    vol = rng.integers(100, 1000, n)
++    import pandas as pd
++    df = pd.DataFrame(
++        {"timestamp": ts, "open": open_, "high": high, "low": low, "close": close, "volume": vol}
++    )
++    return df
++
++
++def run_demo(fast: int, slow: int):
++    """Offline, synthetic paper test using the simple backtesting stub."""
++    try:
++        from backtesting import simple_runner
++    except Exception as e:
++        print(f"[demo] missing backtesting stub: {e}")
++        sys.exit(2)
++    df = make_sinewave_ohlcv()
++    result = simple_runner.run(df, {"fast": fast, "slow": slow})
++    print("[demo] result:", result["summary"])
++    return 0
++
++
++def main():
++    load_dotenv()
++
++    parser = argparse.ArgumentParser(description="Lolo Trading Agent — minimal runtime")
++    parser.add_argument("--health", action="store_true", help="run API key health check and exit")
++    parser.add_argument("--demo", action="store_true", help="run offline synthetic backtest demo")
++    parser.add_argument("--fast", type=int, default=10, help="demo fast SMA")
++    parser.add_argument("--slow", type=int, default=30, help="demo slow SMA")
++    args = parser.parse_args()
++
++    # 1) validate config & 2) ensure DB
++    validate_config()
++    ensure_db()
++
++    # 3) health check (optional)
++    if args.health:
++        rc = run_health_check()
++        sys.exit(rc)
++
++    # 4) demo (default if no other action provided)
++    if args.demo or True:
++        rc = run_demo(args.fast, args.slow)
++        sys.exit(rc)
++
++    # Put real trading/research loops behind explicit flags in the future.
++    print("No action selected. Use --health or --demo.")
++    return 0
++
++
++if __name__ == "__main__":
++    main()
++
+*** End Patch

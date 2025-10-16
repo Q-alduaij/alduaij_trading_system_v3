@@ -1,0 +1,142 @@
+*** Begin Patch
+*** Add File: backtesting/__init__.py
++# backtesting package marker
++
+*** End Patch
+*** Begin Patch
+*** Add File: backtesting/simple_runner.py
++#!/usr/bin/env python3
++"""
++Minimal, dependency-light backtesting stub.
++Purpose: let CI/test harness verify data flow end-to-end without broker/APIs.
++
++Interface:
++    run(data: pd.DataFrame, config: dict) -> dict
++Returns:
++    {
++      "trades": int,
++      "wins": int,
++      "losses": int,
++      "pnl": float,
++      "summary": str,
++    }
++Strategy:
++    Simple SMA crossover (fast vs slow) on close price with naive execution:
++      - Buy when fast crosses above slow; sell/flat when fast below slow.
++Assumptions:
++    - data has columns: ["timestamp","open","high","low","close","volume"]
++    - prices are in arbitrary units; PnL is computed per 1 unit position, no fees/slippage
++"""
++from __future__ import annotations
++import pandas as pd
++import numpy as np
++
++
++def _sma(series: pd.Series, period: int) -> pd.Series:
++    return series.rolling(period, min_periods=period).mean()
++
++
++def run(data: pd.DataFrame, config: dict | None = None) -> dict:
++    if config is None:
++        config = {}
++    fast = int(config.get("fast", 10))
++    slow = int(config.get("slow", 30))
++    if slow <= fast:
++        slow = max(fast + 1, 20)
++
++    df = data.copy()
++    for col in ("timestamp", "open", "high", "low", "close", "volume"):
++        if col not in df.columns:
++            raise ValueError(f"missing required column: {col}")
++
++    df = df.sort_values("timestamp").reset_index(drop=True)
++    df["sma_fast"] = _sma(df["close"], fast)
++    df["sma_slow"] = _sma(df["close"], slow)
++    df["signal"] = 0
++    df.loc[df["sma_fast"] > df["sma_slow"], "signal"] = 1
++    df.loc[df["sma_fast"] < df["sma_slow"], "signal"] = -1
++    df["signal"] = df["signal"].fillna(0)
++
++    # positions: long (1) or flat (0). (No short in this stub.)
++    df["pos"] = 0
++    # enter long on up-cross, flat on down-cross
++    cross_up = (df["signal"].shift(1) <= 0) & (df["signal"] > 0)
++    cross_dn = (df["signal"].shift(1) >= 0) & (df["signal"] < 0)
++    df.loc[cross_up, "pos"] = 1
++    df.loc[cross_dn, "pos"] = 0
++    # forward-fill position state
++    df["pos"] = df["pos"].replace(0, np.nan).ffill().fillna(0)
++
++    # naive PnL: daily return * position
++    df["ret"] = df["close"].pct_change().fillna(0.0)
++    df["pnl"] = df["ret"] * df["pos"]
++
++    # trades: count up-cross entries
++    trades = int(cross_up.sum())
++
++    # win/loss classification on per-bar pnl while in position (coarse)
++    pnl_in_pos = df.loc[df["pos"] == 1, "pnl"]
++    wins = int((pnl_in_pos > 0).sum())
++    losses = int((pnl_in_pos < 0).sum())
++    total_pnl = float(df["pnl"].sum())
++
++    summary = (
++        f"SMA({fast},{slow}) trades={trades}, win_bars={wins}, "
++        f"loss_bars={losses}, pnl={total_pnl:.6f}"
++    )
++    return {
++        "trades": trades,
++        "wins": wins,
++        "losses": losses,
++        "pnl": total_pnl,
++        "summary": summary,
++    }
++
+*** End Patch
+*** Begin Patch
+*** Add File: tests/test_backtest_smoke.py
++import pandas as pd
++import numpy as np
++from datetime import datetime, timedelta
++import importlib
++import pytest
++
++
++def make_sinewave_ohlcv(n=500, start=100.0, amp=2.0, noise=0.3, seed=7):
++    rng = np.random.default_rng(seed)
++    ts0 = datetime(2024, 1, 1)
++    ts = [ts0 + timedelta(minutes=i) for i in range(n)]
++    # synthetic close as sine with noise and drift
++    base = start + amp * np.sin(np.linspace(0, 25, n)) + rng.normal(0, noise, n).cumsum() * 0.01
++    close = np.maximum(0.1, base)  # no negative prices
++    # construct simplistic OHLCV around close
++    open_ = close * (1 + rng.normal(0, 0.0005, n))
++    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.0008, n)))
++    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.0008, n)))
++    vol = rng.integers(100, 1000, n)
++    df = pd.DataFrame(
++        {
++            "timestamp": ts,
++            "open": open_,
++            "high": high,
++            "low": low,
++            "close": close,
++            "volume": vol,
++        }
++    )
++    return df
++
++
++def test_simple_runner_smoke():
++    runner = importlib.import_module("backtesting.simple_runner")
++    df = make_sinewave_ohlcv()
++    result = runner.run(df, {"fast": 10, "slow": 30})
++    assert isinstance(result, dict)
++    for k in ("trades", "wins", "losses", "pnl", "summary"):
++        assert k in result
++    # With a sane synthetic series, we expect at least a few trades and finite pnl
++    assert result["trades"] >= 1
++    assert np.isfinite(result["pnl"])
++    assert isinstance(result["summary"], str) and len(result["summary"]) > 0
++
+*** End Patch

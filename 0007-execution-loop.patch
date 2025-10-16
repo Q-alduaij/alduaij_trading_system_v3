@@ -1,0 +1,407 @@
+*** Begin Patch
+*** Add File: execution/mt5_executor.py
++#!/usr/bin/env python3
++from __future__ import annotations
++import os
++from dataclasses import dataclass
++from typing import Optional
++
++
++@dataclass
++class OrderResult:
++    ok: bool
++    comment: str
++    ticket: Optional[int] = None
++    last_error: Optional[tuple] = None
++
++
++class MT5Executor:
++    """
++    Thin MetaTrader5 Python API wrapper.
++    - Ensures initialize/shutdown.
++    - Symbol selection.
++    - Simple market orders with optional SL/TP points.
++    """
++    def __init__(self, path: str | None = None):
++        self.path = path
++        self._mt5 = None
++
++    def connect(self) -> bool:
++        import MetaTrader5 as mt5
++        self._mt5 = mt5
++        if self.path:
++            ok = mt5.initialize(self.path)
++        else:
++            ok = mt5.initialize()
++        return ok
++
++    def disconnect(self):
++        if self._mt5:
++            self._mt5.shutdown()
++
++    def ensure_symbol(self, symbol: str) -> bool:
++        mt5 = self._mt5
++        if not mt5.symbol_select(symbol, True):
++            return False
++        info = mt5.symbol_info(symbol)
++        return bool(info and info.visible)
++
++    def price(self, symbol: str):
++        mt5 = self._mt5
++        tick = mt5.symbol_info_tick(symbol)
++        if not tick:
++            return None
++        return float(tick.bid), float(tick.ask)
++
++    def market_order(self, symbol: str, side: str, volume: float,
++                     sl_points: int | None = None, tp_points: int | None = None,
++                     comment: str = "lolo-agent", magic: int = 20251014) -> OrderResult:
++        mt5 = self._mt5
++        if side not in ("buy", "sell"):
++            return OrderResult(False, f"invalid side={side}")
++        if not self.ensure_symbol(symbol):
++            return OrderResult(False, f"symbol not available: {symbol}")
++        _bid, _ask = self.price(symbol) or (None, None)
++        if _ask is None:
++            return OrderResult(False, "no price")
++        order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
++        request = {
++            "action": mt5.TRADE_ACTION_DEAL,
++            "symbol": symbol,
++            "volume": float(volume),
++            "type": order_type,
++            "price": _ask if side == "buy" else _bid,
++            "deviation": 20,
++            "magic": magic,
++            "comment": comment,
++            "type_filling": mt5.ORDER_FILLING_FOK,
++        }
++        # Optional SL/TP off price in points
++        if sl_points or tp_points:
++            info = mt5.symbol_info(symbol)
++            point = info.point if info else 0.0001
++            if side == "buy":
++                if sl_points: request["sl"] = request["price"] - sl_points * point
++                if tp_points: request["tp"] = request["price"] + tp_points * point
++            else:
++                if sl_points: request["sl"] = request["price"] + sl_points * point
++                if tp_points: request["tp"] = request["price"] - tp_points * point
++        result = mt5.order_send(request)
++        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
++            return OrderResult(True, "ok", ticket=result.order)
++        return OrderResult(False, f"order_send retcode={getattr(result,'retcode',None)}",
++                           last_error=mt5.last_error())
++
+*** End Patch
+*** Begin Patch
+*** Add File: risk/guard.py
++#!/usr/bin/env python3
++from __future__ import annotations
++import os
++from dataclasses import dataclass
++from typing import Sequence
++from pathlib import Path
++import sqlite3
++from datetime import datetime, timezone
++
++
++@dataclass
++class AccountState:
++    balance: float = 0.0
++    equity: float = 0.0
++    margin_free: float = 0.0
++    open_positions: int = 0
++
++
++class RiskGuard:
++    """
++    Very lightweight guardrail layer. Uses:
++      - ENV limits (kill switch, max daily loss %, max positions, max exposure notional)
++      - SQLite trades/positions for local PnL approximation (optional)
++      - MT5 account info if available (optional)
++    """
++    def __init__(self, sqlite_path: str | None = None):
++        self.sqlite_path = sqlite_path or os.getenv("SQLITE_PATH", "./memory/lolo.db")
++        self.kill_switch = os.getenv("LOLO_KILL_SWITCH", "false").lower() in {"1","true","yes","y"}
++        self.max_positions = int(os.getenv("MAX_POSITIONS", "5"))
++        self.max_daily_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PCT", "5"))
++        self.max_exposure_notional = float(os.getenv("MAX_EXPOSURE_NOTIONAL", "0"))  # 0=disabled
++
++    def _today_iso(self) -> str:
++        return datetime.now(timezone.utc).date().isoformat()
++
++    def _db_daily_pnl(self) -> float:
++        p = Path(self.sqlite_path)
++        if not p.exists():
++            return 0.0
++        try:
++            con = sqlite3.connect(str(p))
++            cur = con.cursor()
++            # naive: sum PnL of positions closed today; open PnL not included
++            cur.execute("""
++                SELECT COALESCE(SUM(pnl), 0.0)
++                FROM positions
++                WHERE closed_at LIKE ?
++            """, (self._today_iso()+"%",))
++            row = cur.fetchone()
++            con.close()
++            return float(row[0] or 0.0)
++        except Exception:
++            return 0.0
++
++    def _mt5_account(self):
++        try:
++            import MetaTrader5 as mt5
++            info = mt5.account_info()
++            positions = mt5.positions_get()
++            return AccountState(
++                balance=info.balance if info else 0.0,
++                equity=info.equity if info else 0.0,
++                margin_free=info.margin_free if info else 0.0,
++                open_positions=len(positions) if positions else 0,
++            )
++        except Exception:
++            return AccountState()
++
++    def check_all(self, new_orders: int = 0, est_notional: float = 0.0) -> tuple[bool, str]:
++        if self.kill_switch:
++            return False, "Kill switch is active (LOLO_KILL_SWITCH=true)."
++        acct = self._mt5_account()
++        # daily loss guard (based on equity vs balance if available; fallback to db)
++        if acct.balance > 0:
++            dd = ((acct.equity - acct.balance) / max(acct.balance, 1e-9)) * 100.0
++            if abs(dd) >= self.max_daily_loss_pct and (acct.equity < acct.balance):
++                return False, f"Daily loss cap hit: {dd:.2f}% ≥ {self.max_daily_loss_pct}%."
++        else:
++            pnl = self._db_daily_pnl()
++            if pnl < 0:
++                # without balance we compare absolute pct cap as notional guard
++                if abs(pnl) >= self.max_exposure_notional > 0:
++                    return False, "Daily loss (db) exceeds exposure guard."
++        # positions cap
++        if acct.open_positions + new_orders > self.max_positions:
++            return False, f"Position cap: {acct.open_positions}+{new_orders} > {self.max_positions}."
++        # exposure cap
++        if self.max_exposure_notional > 0 and est_notional > self.max_exposure_notional:
++            return False, f"Exposure cap: {est_notional} > {self.max_exposure_notional}."
++        return True, "OK"
++
+*** End Patch
+*** Begin Patch
+*** Add File: signals/mt5_sma_agent.py
++#!/usr/bin/env python3
++from __future__ import annotations
++from typing import Literal, Optional
++import pandas as pd
++
++Side = Literal["buy", "sell", "flat"]
++
++
++def _copy_rates(mt5, symbol: str, timeframe, bars: int = 200) -> Optional[pd.DataFrame]:
++    r = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
++    if r is None:
++        return None
++    df = pd.DataFrame(r)
++    if "time" in df.columns:
++        df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
++    return df[["timestamp", "open", "high", "low", "close", "tick_volume"]].rename(
++        columns={"tick_volume": "volume"}
++    )
++
++
++def _tf_to_mt5(mt5, tf: str):
++    tf = tf.upper()
++    mapping = {
++        "M1": mt5.TIMEFRAME_M1,
++        "M5": mt5.TIMEFRAME_M5,
++        "M15": mt5.TIMEFRAME_M15,
++        "M30": mt5.TIMEFRAME_M30,
++        "H1": mt5.TIMEFRAME_H1,
++    }
++    return mapping.get(tf, mt5.TIMEFRAME_M1)
++
++
++def _sma(series: pd.Series, period: int) -> pd.Series:
++    return series.rolling(period, min_periods=period).mean()
++
++
++def last_signal(symbol: str, timeframe: str = "M1", fast: int = 10, slow: int = 30) -> Side:
++    """
++    Pulls recent candles from MT5 for `symbol` and computes a simple SMA crossover signal.
++    buy = fast > slow, sell = fast < slow, flat otherwise.
++    """
++    import MetaTrader5 as mt5
++    if not mt5.symbol_select(symbol, True):
++        return "flat"
++    tf = _tf_to_mt5(mt5, timeframe)
++    df = _copy_rates(mt5, symbol, tf, bars=max(slow * 3, 200))
++    if df is None or df.empty:
++        return "flat"
++    df = df.sort_values("timestamp").reset_index(drop=True)
++    df["sma_fast"] = _sma(df["close"], fast)
++    df["sma_slow"] = _sma(df["close"], slow)
++    row = df.iloc[-1]
++    if pd.isna(row["sma_fast"]) or pd.isna(row["sma_slow"]):
++        return "flat"
++    if row["sma_fast"] > row["sma_slow"]:
++        return "buy"
++    if row["sma_fast"] < row["sma_slow"]:
++        return "sell"
++    return "flat"
++
+*** End Patch
+*** Begin Patch
+*** Update File: main.py
+@@
+-    parser = argparse.ArgumentParser(description="Lolo Trading Agent — minimal runtime")
+-    parser.add_argument("--health", action="store_true", help="run API key health check and exit")
+-    parser.add_argument("--demo", action="store_true", help="run offline synthetic backtest demo")
+-    parser.add_argument("--fast", type=int, default=10, help="demo fast SMA")
+-    parser.add_argument("--slow", type=int, default=30, help="demo slow SMA")
++    parser = argparse.ArgumentParser(description="Lolo Trading Agent — runtime")
++    # Diagnostics
++    parser.add_argument("--health", action="store_true", help="run API key health check and exit")
++    parser.add_argument("--demo", action="store_true", help="run offline synthetic backtest demo")
++    parser.add_argument("--fast", type=int, default=10, help="SMA fast")
++    parser.add_argument("--slow", type=int, default=30, help="SMA slow")
++    # Execution
++    parser.add_argument("--paper-exec", action="store_true",
++                        help="execute signals on MT5 *demo* account only (safe default)")
++    parser.add_argument("--live-exec", action="store_true",
++                        help="execute signals on MT5 *live* account (requires PAPER_TRADING=false)")
++    parser.add_argument("--symbols", nargs="+", default=["EURUSD"], help="symbols to trade")
++    parser.add_argument("--timeframe", default="M1", help="M1/M5/M15/M30/H1")
++    parser.add_argument("--lot", type=float, default=0.01, help="fixed volume lots per trade")
++    parser.add_argument("--sl-points", type=int, default=0, help="optional stop loss in points")
++    parser.add_argument("--tp-points", type=int, default=0, help="optional take profit in points")
++    parser.add_argument("--interval", type=int, default=30, help="seconds between loops")
++    parser.add_argument("--once", action="store_true", help="run one pass and exit")
+@@
+-    # 4) demo (default if no other action provided)
+-    if args.demo or True:
++    # 4) demo (if requested)
++    if args.demo:
+         rc = run_demo(args.fast, args.slow)
+         sys.exit(rc)
+ 
+-    # Put real trading/research loops behind explicit flags in the future.
+-    print("No action selected. Use --health or --demo.")
+-    return 0
++    # 5) Execution (paper / live)
++    if args.paper_exec or args.live_exec:
++        # SAFETY GATES
++        paper_env = os.getenv("PAPER_TRADING", "true").lower() in {"1","true","yes","y"}
++        if args.live_exec and paper_env:
++            print("[exec] Refusing to run live while PAPER_TRADING=true. Set PAPER_TRADING=false in .env.")
++            sys.exit(2)
++        if args.paper_exec and not paper_env:
++            print("[exec] Warning: PAPER_TRADING=false but --paper-exec chosen; proceeding anyway.")
++
++        # MT5 connect
++        from execution.mt5_executor import MT5Executor
++        ex = MT5Executor(os.getenv("MT5_PATH"))
++        if not ex.connect():
++            print("[exec] MT5 initialize failed.")
++            sys.exit(2)
++
++        # Risk guard
++        from risk.guard import RiskGuard
++        rg = RiskGuard()
++
++        # Signal source (MT5 candles + SMA agent)
++        from signals.mt5_sma_agent import last_signal
++        import time
++
++        def one_pass():
++            new_orders = 0
++            est_notional = 0.0
++            checks, msg = rg.check_all(new_orders=0, est_notional=0.0)
++            if not checks:
++                print(f"[risk] {msg}")
++                return
++            for sym in args.symbols:
++                sig = last_signal(sym, args.timeframe, args.fast, args.slow)
++                if sig == "flat":
++                    print(f"[signal] {sym}: flat")
++                    continue
++                # Estimate notional very roughly: price * lots (broker dependent!)
++                px = ex.price(sym)
++                if not px:
++                    print(f"[price] {sym}: no price")
++                    continue
++                bid, ask = px
++                quote = ask if sig == "buy" else bid
++                est_notional += max(quote, 0) * args.lot
++                ok, why = rg.check_all(new_orders=new_orders + 1, est_notional=est_notional)
++                if not ok:
++                    print(f"[risk] block {sym}: {why}")
++                    continue
++                print(f"[order] {sym} {sig} {args.lot} @ ~{quote}")
++                res = ex.market_order(sym, sig, args.lot,
++                                      sl_points=(args.sl_points or None),
++                                      tp_points=(args.tp_points or None),
++                                      comment="lolo-agent")
++                if res.ok:
++                    new_orders += 1
++                    print(f"[order] OK ticket={res.ticket}")
++                else:
++                    print(f"[order] FAIL {res.comment} err={res.last_error}")
++
++        try:
++            if args.once:
++                one_pass()
++            else:
++                while True:
++                    one_pass()
++                    time.sleep(max(args.interval, 5))
++        finally:
++            ex.disconnect()
++        sys.exit(0)
++
++    print("No action selected. Use --health, --demo, --paper-exec, or --live-exec.")
++    return 0
+*** End Patch
+*** Begin Patch
+*** Update File: .env.example
+@@
+ # Optional: logging / debug
+ LOG_LEVEL=INFO
+ 
+ # Example test symbols used by health-checks
+ TEST_SYMBOL=AAPL
+ 
+ # --- Safety rails for execution ---
+ LOLO_KILL_SWITCH=false
+ MAX_POSITIONS=5
+ MAX_DAILY_LOSS_PCT=5
+ MAX_EXPOSURE_NOTIONAL=0   # 0=disabled, else rough cap in quote currency units
+*** End Patch
+*** Begin Patch
+*** Update File: README.md
+@@
+ To validate API keys without trading:
+ ```bash
+ python main.py --health
+ ```
+ 
+ ## Paper / Live Execution (MT5)
+ 
+ > **Important safety**  
+ > - Keep `PAPER_TRADING=true` (default) for demo accounts.  
+ > - Set `LOLO_KILL_SWITCH=true` to halt all new orders instantly.  
+ > - Configure caps in `.env`: `MAX_POSITIONS`, `MAX_DAILY_LOSS_PCT`, `MAX_EXPOSURE_NOTIONAL`.
+ 
+ **Paper (demo account):**
+ ```bash
+ python main.py --paper-exec --symbols EURUSD XAUUSD --timeframe M1 --fast 10 --slow 30 --lot 0.01 --once
+ ```
+ Remove `--once` to run continuously (default interval 30s; change with `--interval`).
+ 
+ **Live (real account):**
+ ```bash
+ # In .env set PAPER_TRADING=false  (required)
+ python main.py --live-exec --symbols EURUSD --timeframe M1 --fast 10 --slow 30 --lot 0.01 --once
+ ```
+ Live mode is blocked unless `PAPER_TRADING=false`.
+ 
+*** End Patch

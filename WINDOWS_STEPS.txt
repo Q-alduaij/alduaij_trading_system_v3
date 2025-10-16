@@ -1,0 +1,63 @@
+WINDOWS STEP-BY-STEP (Lolo-Trading-Agent)
+
+1) Prereqs
+   - Install Python 3.11 (64‑bit) and Git for Windows.
+   - Install MetaTrader 5 (64‑bit) and log in to a DEMO account. Note the path (e.g. C:\Program Files\MetaTrader 5\terminal64.exe).
+
+2) Clone your repo
+   PowerShell:
+   git clone https://github.com/Q-alduaij/Lolo-Trading-Agent-.git
+   cd Lolo-Trading-Agent-
+
+3) Download patch files (from ChatGPT links) into the repo root:
+   0001-bootstrap-files.patch
+   0002-readme-setup-section.patch
+   0003-devx-ci-tooling.patch
+   0004-tests-and-constraints.patch
+   0005-backtesting-stub.patch
+   0006-minimal-runtime.patch
+   0007-execution-loop.patch
+
+4) Apply patches
+   git apply --check 0001-bootstrap-files.patch && git apply 0001-bootstrap-files.patch
+   git apply --check 0002-readme-setup-section.patch && git apply 0002-readme-setup-section.patch
+   git apply --check 0003-devx-ci-tooling.patch && git apply 0003-devx-ci-tooling.patch
+   git apply --check 0004-tests-and-constraints.patch && git apply 0004-tests-and-constraints.patch
+   git apply --check 0005-backtesting-stub.patch && git apply 0005-backtesting-stub.patch
+   git apply --check 0006-minimal-runtime.patch && git apply 0006-minimal-runtime.patch
+   git apply --check 0007-execution-loop.patch && git apply 0007-execution-loop.patch
+
+5) Create venv & install deps
+   py -3.11 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   # Create or update requirements.txt with the provided snippet
+   notepad requirements.txt      (paste the contents of requirements_snippet.txt)
+   pip install -r requirements.txt -c constraints.txt
+
+6) Configure environment
+   Copy-Item .env.example .env
+   notepad .env
+     - Set MT5_PATH to your terminal path (e.g. C:\Program Files\MetaTrader 5\terminal64.exe)
+     - Keep PAPER_TRADING=true for demo
+     - Optionally add API keys
+
+7) Initialize local DB
+   python .\utils\db_init.py
+
+8) Offline demo (quick sanity)
+   python .\main.py --demo
+
+9) Health check (APIs + MT5 init)
+   python .\main.py --health
+
+10) Paper execution (one pass)
+   # Ensure MT5 is open and EURUSD visible in Market Watch
+   python .\main.py --paper-exec --symbols EURUSD --timeframe M1 --fast 10 --slow 30 --lot 0.01 --once
+
+11) Continuous paper execution (every 30s)
+   python .\main.py --paper-exec --symbols EURUSD --timeframe M1 --fast 10 --slow 30 --lot 0.01 --interval 30
+
+12) Live execution (ONLY if intended)
+   - Edit .env: PAPER_TRADING=false
+   python .\main.py --live-exec --symbols EURUSD --timeframe M1 --fast 10 --slow 30 --lot 0.01 --once
+   # Emergency stop: set LOLO_KILL_SWITCH=true in .env to block new orders

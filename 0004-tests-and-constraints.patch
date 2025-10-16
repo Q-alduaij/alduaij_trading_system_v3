@@ -1,0 +1,201 @@
+*** Begin Patch
+*** Add File: constraints.txt
++# Pin key toolchain & runtime libs for reproducible CI
++black==24.8.0
++eventlet==0.36.1
++flask==3.0.3
++flask-socketio==5.3.6
++isort==5.13.2
++MetaTrader5==5.0.45
++numpy==2.1.2
++pandas==2.2.3
++PyYAML==6.0.2
++python-dotenv==1.0.1
++pydantic==2.9.2
++requests==2.32.3
++ruff==0.6.8
++ta==0.10.2
++chromadb==0.5.5
++sentence-transformers==3.0.1
++pytest==8.3.3
++
+*** End Patch
+*** Begin Patch
+*** Add File: requirements-dev.txt
++# Developer-only requirements
++pytest>=8.3.3
++
+*** End Patch
+*** Begin Patch
+*** Add File: tests/__init__.py
++# makes tests a package
++
+*** End Patch
+*** Begin Patch
+*** Add File: tests/test_config_validate.py
++import os
++import tempfile
++from pathlib import Path
++
++import importlib
++import types
++
++
++def write_yaml(path: Path, text: str):
++    path.write_text(text, encoding="utf-8")
++
++
++def test_config_validate_ok(tmp_path: Path, monkeypatch):
++    # Prepare minimal YAMLs
++    cfg_dir = tmp_path / "config"
++    cfg_dir.mkdir(parents=True, exist_ok=True)
++    write_yaml(cfg_dir / "instruments.yaml", "instruments:\n  - symbol: EURUSD\n")
++    write_yaml(cfg_dir / "strategies.yaml", "strategy:\n  name: test\n")
++
++    # Chdir so the validator finds files at expected relative paths
++    monkeypatch.chdir(tmp_path)
++
++    # Ensure env defaults are fine
++    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "memory" / "lolo.db"))
++    (tmp_path / "memory").mkdir(exist_ok=True)
++
++    mod = importlib.import_module("utils.config_validate")
++    rc = mod.main()
++    assert rc == 0
++
++
++def test_config_validate_missing_files(tmp_path: Path, monkeypatch):
++    monkeypatch.chdir(tmp_path)
++    mod = importlib.import_module("utils.config_validate")
++    rc = mod.main()
++    # Should not hard-fail when YAMLs are missing; returns 0 and prints a notice
++    assert rc == 0
++
+*** End Patch
+*** Begin Patch
+*** Add File: tests/test_api_key_health_check.py
++import importlib
++import sys
++from types import SimpleNamespace
++
++import pytest
++
++
++class DummyResp:
++    def __init__(self, status_code=401, text="{}", json_data=None):
++        self.status_code = status_code
++        self.text = text
++        self._json = json_data if json_data is not None else {}
++
++    def json(self):
++        return self._json
++
++
++def test_health_check_missing_env(monkeypatch):
++    # Clear all env vars that the checker relies on
++    keys = [
++        "OPENROUTER_API_KEY",
++        "OPENAI_API_KEY",
++        "FINNHUB_API_KEY",
++        "ALPHAVANTAGE_API_KEY",
++        "NEWSAPI_KEY",
++        "TWELVEDATA_API_KEY",
++        "POLYGON_API_KEY",
++        "SQLITE_PATH",
++        "CHROMA_DIR",
++    ]
++    for k in keys:
++        monkeypatch.delenv(k, raising=False)
++
++    # Import module fresh
++    mod = importlib.import_module("tools.api_key_health_check")
++
++    with pytest.raises(SystemExit) as se:
++        mod.main()
++    # Expect non-zero exit due to missing envs
++    assert se.value.code != 0
++
++
++def test_health_check_with_mocked_providers(monkeypatch, tmp_path):
++    # Provide dummy env vars so each provider path is exercised
++    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy")
++    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
++    monkeypatch.setenv("FINNHUB_API_KEY", "dummy")
++    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "dummy")
++    monkeypatch.setenv("NEWSAPI_KEY", "dummy")
++    monkeypatch.setenv("TWELVEDATA_API_KEY", "dummy")
++    monkeypatch.setenv("POLYGON_API_KEY", "dummy")
++    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "memory" / "lolo.db"))
++    monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
++
++    # Make directories expected by checker
++    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
++    (tmp_path / "chroma").mkdir(parents=True, exist_ok=True)
++
++    # Mock requests.get so no network happens; return 401 to simulate invalid keys
++    import requests
++
++    def fake_get(*a, **kw):
++        # Simulate different bodies where needed
++        url = a[0]
++        if "finnhub.io" in url:
++            return DummyResp(status_code=200, json_data={"c": 0.0})
++        if "alphavantage.co" in url:
++            return DummyResp(status_code=200, text='{"Time Series (5min)": {}}')
++        if "twelvedata.com" in url:
++            return DummyResp(status_code=200, json_data={"values": []})
++        # Others: unauthorized
++        return DummyResp(status_code=401, text="{}")
++
++    monkeypatch.setattr(requests, "get", fake_get)
++
++    # Mock MetaTrader5 module so import/initialize succeeds without the real package
++    class FakeMT5:
++        @staticmethod
++        def initialize(*a, **kw):
++            return True
++
++        @staticmethod
++        def shutdown():
++            return True
++
++        @staticmethod
++        def last_error():
++            return (0, "OK")
++
++    sys.modules["MetaTrader5"] = FakeMT5()
++
++    mod = importlib.import_module("tools.api_key_health_check")
++    # Should exit with 0 now (since all checks return ok-ish under our fakes)
++    with pytest.raises(SystemExit) as se:
++        mod.main()
++    assert se.value.code == 0
++
+*** End Patch
+*** Begin Patch
+*** Update File: .github/workflows/ci.yml
+@@
+       - name: Install deps
+         run: |
+           python -m pip install -U pip
+-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+-          pip install black ruff isort
++          if [ -f constraints.txt ]; then CONSTRAINTS="-c constraints.txt"; fi
++          if [ -f requirements.txt ]; then pip install $CONSTRAINTS -r requirements.txt; fi
++          if [ -f requirements-dev.txt ]; then pip install $CONSTRAINTS -r requirements-dev.txt; fi
++          pip install $CONSTRAINTS black ruff isort
+       - name: Ruff (lint)
+         run: ruff check .
+       - name: Black (format check)
+         run: black --check .
+       - name: isort (imports)
+         run: isort --check-only .
+-      - name: Config validate (optional)
++      - name: Config validate
+         run: |
+-          if [ -f utils/config_validate.py ]; then python utils/config_validate.py || true; fi
++          if [ -f utils/config_validate.py ]; then python utils/config_validate.py; fi
++      - name: Run tests
++        run: |
++          if [ -d tests ]; then pytest -q; fi
+*** End Patch

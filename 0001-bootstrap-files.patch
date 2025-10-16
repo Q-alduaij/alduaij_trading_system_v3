@@ -1,0 +1,332 @@
+*** Begin Patch
+*** Add File: .env.example
++# Copy this file to .env and fill in real values
++
++# LLM / OpenRouter / OpenAI
++OPENROUTER_API_KEY=
++OPENROUTER_MODEL=deepseek/deepseek-chat-v3.1:free
++OPENAI_API_KEY=
++
++# MetaTrader5 (if using MT5 Python package)
++MT5_PATH=
++MT5_LOGIN=
++MT5_PASSWORD=
++MT5_SERVER=
++MT5_ENABLE_EXPERTS=true
++
++# Market data providers
++POLYGON_API_KEY=
++FINNHUB_API_KEY=
++ALPHAVANTAGE_API_KEY=
++TWELVEDATA_API_KEY=
++FMP_API_KEY=
++
++# News / Sentiment
++NEWSAPI_KEY=
++
++# Storage / memory
++SQLITE_PATH=./memory/lolo.db
++CHROMA_DIR=./memory/chroma
++PAPER_TRADING=true
++
++# Optional: logging / debug
++LOG_LEVEL=INFO
++
++# Example test symbols used by health-checks
++TEST_SYMBOL=AAPL
++
+*** End Patch
+*** Begin Patch
+*** Add File: config/instruments.yaml
++instruments:
++  - symbol: EURUSD
++    type: forex
++    lot_min: 0.01
++    lot_max: 1.0
++  - symbol: XAUUSD
++    type: commodity
++    lot_min: 0.01
++    lot_max: 0.5
++  - symbol: US500
++    type: index
++    lot_min: 0.01
++    lot_max: 2.0
++  - symbol: AAPL
++    type: stock
++    lot_min: 1
++    lot_max: 100
++
++session:
++  timezone: UTC
++  trading_hours:
++    start: '00:00'
++    end: '23:59'
++
+*** End Patch
+*** Begin Patch
+*** Add File: config/strategies.yaml
++strategy:
++  name: example_momentum
++  timeframe: 60  # minutes
++  indicators:
++    - name: sma
++      period: 50
++    - name: rsi
++      period: 14
++
++risk:
++  risk_per_trade_pct: 1.0
++  max_daily_loss_pct: 5.0
++  max_positions: 5
++  max_drawdown_pct: 10.0
++
++execution:
++  slippage: 0.5
++  order_type: market
++
+*** End Patch
+*** Begin Patch
+*** Add File: utils/db_init.py
++#!/usr/bin/env python3
++"""
++Simple DB bootstrap for Lolo Trading Agent.
++Creates sqlite file and basic tables if they don't exist.
++"""
++import os
++import sqlite3
++from pathlib import Path
++
++DB_PATH = os.environ.get('SQLITE_PATH', './memory/lolo.db')
++
++SCHEMA = """
++PRAGMA foreign_keys = ON;
++
++CREATE TABLE IF NOT EXISTS signals (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    timestamp TEXT NOT NULL,
++    symbol TEXT NOT NULL,
++    timeframe TEXT,
++    indicator_snapshot TEXT,
++    side TEXT,
++    confidence REAL,
++    processed INTEGER DEFAULT 0
++);
++
++CREATE TABLE IF NOT EXISTS positions (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    opened_at TEXT NOT NULL,
++    closed_at TEXT,
++    symbol TEXT NOT NULL,
++    size REAL,
++    entry_price REAL,
++    exit_price REAL,
++    pnl REAL,
++    status TEXT
++);
++
++CREATE TABLE IF NOT EXISTS trades (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    position_id INTEGER,
++    executed_at TEXT NOT NULL,
++    symbol TEXT NOT NULL,
++    side TEXT,
++    price REAL,
++    size REAL,
++    fees REAL DEFAULT 0,
++    FOREIGN KEY(position_id) REFERENCES positions(id) ON DELETE SET NULL
++);
++"""
++
++
++def ensure_db(path: str = DB_PATH):
++    p = Path(path)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(str(p))
++    try:
++        cur = conn.cursor()
++        cur.executescript(SCHEMA)
++        conn.commit()
++        print(f"Initialized DB at: {p}")
++    finally:
++        conn.close()
++
++
++if __name__ == '__main__':
++    ensure_db()
++
+*** End Patch
+*** Begin Patch
+*** Add File: tools/api_key_health_check.py
++#!/usr/bin/env python3
++"""
++API Key Health Check Utility
++
++Usage (from repo root):
++    pip install -r requirements.txt
++    python tools/api_key_health_check.py
++
++Reads .env values (requires python-dotenv) and runs lightweight checks.
++"""
++import os
++import sys
++from typing import Dict
++
++import requests
++from dotenv import load_dotenv
++
++load_dotenv()
++
++TEST_SYMBOL = os.getenv('TEST_SYMBOL', 'AAPL')
++
++def test_openrouter(key: str) -> Dict:
++    url = 'https://api.openrouter.ai/v1/models'
++    headers = {'Authorization': f'Bearer {key}'}
++    try:
++        r = requests.get(url, headers=headers, timeout=10)
++        return {'ok': r.status_code == 200, 'status_code': r.status_code, 'body': r.text[:200]}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_finnhub(key: str) -> Dict:
++    url = f'https://finnhub.io/api/v1/quote?symbol={TEST_SYMBOL}&token={key}'
++    try:
++        r = requests.get(url, timeout=8)
++        j = r.json()
++        ok = r.status_code == 200 and ('c' in j)
++        return {'ok': ok, 'status_code': r.status_code, 'json_keys': list(j.keys())}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_alphavantage(key: str) -> Dict:
++    url = f'https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=IBM&interval=5min&apikey={key}'
++    try:
++        r = requests.get(url, timeout=8)
++        ok = r.status_code == 200 and 'Time Series' in r.text
++        return {'ok': ok, 'status_code': r.status_code, 'snippet': r.text[:200]}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_newsapi(key: str) -> Dict:
++    url = f'https://newsapi.org/v2/top-headlines?country=us&apiKey={key}'
++    try:
++        r = requests.get(url, timeout=8)
++        return {'ok': r.status_code == 200, 'status_code': r.status_code, 'text': r.text[:200]}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_twelvedata(key: str) -> Dict:
++    url = f'https://api.twelvedata.com/time_series?symbol={TEST_SYMBOL}&interval=1min&apikey={key}'
++    try:
++        r = requests.get(url, timeout=8)
++        j = r.json()
++        ok = r.status_code == 200 and (('values' in j) or ('status' in j and j.get('status') != 'error'))
++        return {'ok': ok, 'status_code': r.status_code, 'snippet': r.text[:200]}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_polygon(key: str) -> Dict:
++    url = f'https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?active=true&apiKey={key}'
++    try:
++        r = requests.get(url, timeout=8)
++        return {'ok': r.status_code == 200, 'status_code': r.status_code, 'snippet': r.text[:200]}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_openai(key: str) -> Dict:
++    url = 'https://api.openai.com/v1/models'
++    headers = {'Authorization': f'Bearer {key}'}
++    try:
++        r = requests.get(url, headers=headers, timeout=10)
++        return {'ok': r.status_code == 200, 'status_code': r.status_code}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++def test_mt5() -> Dict:
++    try:
++        import MetaTrader5 as mt5
++    except Exception as e:
++        return {'ok': False, 'error': f'MetaTrader5 import failed: {e}'}
++    mt5_path = os.getenv('MT5_PATH')
++    try:
++        init_res = mt5.initialize(mt5_path) if mt5_path else mt5.initialize()
++        if not init_res:
++            err = mt5.last_error()
++            return {'ok': False, 'error': f'mt5.initialize() returned False, last_error={err}'}
++        mt5.shutdown()
++        return {'ok': True}
++    except Exception as e:
++        return {'ok': False, 'error': str(e)}
++
++CHECKS = [
++    ('OPENROUTER_API_KEY', 'OpenRouter', test_openrouter),
++    ('OPENAI_API_KEY', 'OpenAI', test_openai),
++    ('FINNHUB_API_KEY', 'Finnhub', test_finnhub),
++    ('ALPHAVANTAGE_API_KEY', 'AlphaVantage', test_alphavantage),
++    ('NEWSAPI_KEY', 'NewsAPI', test_newsapi),
++    ('TWELVEDATA_API_KEY', 'TwelveData', test_twelvedata),
++    ('POLYGON_API_KEY', 'Polygon', test_polygon),
++]
++
++def main():
++    results = {}
++    failures = 0
++
++    for envvar, label, fn in CHECKS:
++        key = os.getenv(envvar)
++        if not key:
++            results[label] = {'ok': False, 'error': f'Env var {envvar} not set'}
++            failures += 1
++            continue
++        try:
++            res = fn(key)
++            results[label] = res
++            if not res.get('ok'):
++                failures += 1
++        except Exception as e:
++            results[label] = {'ok': False, 'error': str(e)}
++            failures += 1
++
++    # MT5 test (non-HTTP)
++    try:
++        mt5_res = test_mt5()
++        results['MetaTrader5'] = mt5_res
++        if not mt5_res.get('ok'):
++            failures += 1
++    except Exception as e:
++        results['MetaTrader5'] = {'ok': False, 'error': str(e)}
++        failures += 1
++
++    # Local storage checks
++    sqlite_path = os.getenv('SQLITE_PATH', './memory/lolo.db')
++    chroma_dir = os.getenv('CHROMA_DIR', './memory/chroma')
++    from pathlib import Path
++    Path(os.path.dirname(sqlite_path) or '.').mkdir(parents=True, exist_ok=True)
++    results['SQLiteDir'] = {'ok': os.path.isdir(os.path.dirname(sqlite_path) or '.')}
++    results['ChromaDir'] = {'ok': os.path.isdir(chroma_dir), 'path': chroma_dir}
++
++    print("
+API Key Health Check Summary:
+")
++    for k, v in results.items():
++        ok = v.get('ok')
++        if ok:
++            print(f"[OK]   {k}")
++        else:
++            err = v.get('error') or v.get('status_code') or v.get('snippet') or 'unknown'
++            print(f"[FAIL] {k}: {err}")
++
++    if failures > 0:
++        print(f"
+Completed with {failures} failure(s). Review the errors above.
+")
++        sys.exit(2)
++    else:
++        print("
+All required checks passed.
+")
++        sys.exit(0)
++
++if __name__ == '__main__':
++    main()
++
+*** End Patch

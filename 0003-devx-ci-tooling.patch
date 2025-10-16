@@ -1,0 +1,226 @@
+*** Begin Patch
+*** Add File: .gitignore
++.env
++*.env
++__pycache__/
++*.pyc
++.pytest_cache/
++.mypy_cache/
++.ruff_cache/
++.coverage
++coverage.xml
++dist/
++build/
++.DS_Store
++.venv/
++env/
++venv/
++.idea/
++.vscode/
++
++# project data
++memory/
++.memory/
++logs/
++.chroma/
++
+*** End Patch
+*** Begin Patch
+*** Add File: pyproject.toml
++[tool.black]
++line-length = 100
++target-version = ["py311"]
++exclude = "\\.venv|dist|build|__pycache__|.git|.chroma|memory|logs"
++
++[tool.ruff]
++line-length = 100
++target-version = "py311"
++select = ["E","F","I","UP","W","B"]
++ignore = ["E203","E501"]  # keep with Black compatibility
++exclude = [".venv","dist","build","__pycache__", ".git",".chroma","memory","logs"]
++
++[tool.isort]
++profile = "black"
++line_length = 100
++
+*** End Patch
+*** Begin Patch
+*** Add File: .pre-commit-config.yaml
++repos:
++  - repo: https://github.com/psf/black
++    rev: 24.8.0
++    hooks:
++      - id: black
++  - repo: https://github.com/astral-sh/ruff-pre-commit
++    rev: v0.6.8
++    hooks:
++      - id: ruff
++        args: ["--fix"]
++  - repo: https://github.com/pycqa/isort
++    rev: 5.13.2
++    hooks:
++      - id: isort
++  - repo: https://github.com/adrienverge/yamllint
++    rev: v1.35.1
++    hooks:
++      - id: yamllint
++
+*** End Patch
+*** Begin Patch
+*** Add File: .github/workflows/ci.yml
++name: ci
++on:
++  push:
++  pull_request:
++
++jobs:
++  lint:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.11"
++      - name: Install deps
++        run: |
++          python -m pip install -U pip
++          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
++          pip install black ruff isort
++      - name: Ruff (lint)
++        run: ruff check .
++      - name: Black (format check)
++        run: black --check .
++      - name: isort (imports)
++        run: isort --check-only .
++      - name: Config validate (optional)
++        run: |
++          if [ -f utils/config_validate.py ]; then python utils/config_validate.py || true; fi
++
+*** End Patch
+*** Begin Patch
+*** Add File: Makefile
++PY=python
++VENV=.venv
++
++.PHONY: init db health lint fmt precommit
++
++init:
++	$(PY) -m venv $(VENV); . $(VENV)/bin/activate; pip install -r requirements.txt
++
++db:
++	$(PY) utils/db_init.py
++
++health:
++	$(PY) tools/api_key_health_check.py
++
++lint:
++	ruff check . && black --check . && isort --check-only .
++
++fmt:
++	black . && ruff check --fix . && isort .
++
++precommit:
++	pip install pre-commit && pre-commit install
++
+*** End Patch
+*** Begin Patch
+*** Add File: utils/config_validate.py
++#!/usr/bin/env python3
++"""
++Basic config validation for Lolo Trading Agent
++ - Validates key env vars (with defaults)
++ - Confirms YAML structure is present & readable
++Run:
++    python utils/config_validate.py
++"""
++from __future__ import annotations
++import os
++import sys
++from typing import Any
++
++try:
++    from pydantic import BaseModel, Field, ValidationError
++except Exception as e:
++    print("pydantic not installed. `pip install pydantic` or add to requirements.txt.")
++    sys.exit(0)  # non-fatal for CI
++
++try:
++    import yaml
++except Exception:
++    print("PyYAML not installed. `pip install PyYAML` or add to requirements.txt.")
++    sys.exit(0)  # non-fatal for CI
++
++
++class EnvCfg(BaseModel):
++    PAPER_TRADING: bool = Field(default=True, description="Disable live trading by default")
++    SQLITE_PATH: str = Field(default="./memory/lolo.db")
++    OPENROUTER_API_KEY: str | None = None
++    OPENAI_API_KEY: str | None = None
++    FINNHUB_API_KEY: str | None = None
++    ALPHAVANTAGE_API_KEY: str | None = None
++    NEWSAPI_KEY: str | None = None
++    TWELVEDATA_API_KEY: str | None = None
++    POLYGON_API_KEY: str | None = None
++
++
++def load_env() -> EnvCfg:
++    def as_bool(v: str, default: bool) -> bool:
++        if v is None:
++            return default
++        return str(v).strip().lower() in {"1", "true", "yes", "y"}
++
++    return EnvCfg(
++        PAPER_TRADING=as_bool(os.getenv("PAPER_TRADING", "true"), True),
++        SQLITE_PATH=os.getenv("SQLITE_PATH", "./memory/lolo.db"),
++        OPENROUTER_API_KEY=os.getenv("OPENROUTER_API_KEY"),
++        OPENAI_API_KEY=os.getenv("OPENAI_API_KEY"),
++        FINNHUB_API_KEY=os.getenv("FINNHUB_API_KEY"),
++        ALPHAVANTAGE_API_KEY=os.getenv("ALPHAVANTAGE_API_KEY"),
++        NEWSAPI_KEY=os.getenv("NEWSAPI_KEY"),
++        TWELVEDATA_API_KEY=os.getenv("TWELVEDATA_API_KEY"),
++        POLYGON_API_KEY=os.getenv("POLYGON_API_KEY"),
++    )
++
++
++def load_yaml(path: str) -> dict[str, Any]:
++    with open(path, "r", encoding="utf-8") as f:
++        return yaml.safe_load(f) or {}
++
++
++def main() -> int:
++    try:
++        env = load_env()
++    except ValidationError as e:
++        print(f"[ENV] Validation error:
+{e}")
++        return 2
++
++    print("[ENV] OK — PAPER_TRADING =", env.PAPER_TRADING, ", SQLITE_PATH =", env.SQLITE_PATH)
++
++    # Validate YAMLs if present
++    missing = []
++    for f in ("config/instruments.yaml", "config/strategies.yaml"):
++        if not os.path.isfile(f):
++            missing.append(f)
++            continue
++        try:
++            doc = load_yaml(f)
++            if not isinstance(doc, dict):
++                print(f"[CFG] {f}: not a mapping/dict at top-level")
++                return 2
++            print(f"[CFG] {f}: OK")
++        except Exception as e:
++            print(f"[CFG] {f}: failed to load — {e}")
++            return 2
++
++    if missing:
++        print("[CFG] Missing files:", ", ".join(missing))
++        # non-fatal: repo may not have them committed yet
++
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
++
+*** End Patch

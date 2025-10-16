@@ -1,0 +1,25 @@
+﻿# Core
+pandas>=2.2.0
+numpy>=1.26.0
+requests>=2.31.0
+python-dotenv>=1.0.1
+PyYAML>=6.0.1
+pydantic>=2.7.0
+
+# Observability (optional)
+rich>=13.7.1
+
+# Trading / MT5 (optional but recommended if you execute via MT5)
+MetaTrader5>=5.0.45
+
+# TA library (optional if you compute indicators)
+ta>=0.10.2
+
+# Memory / RAG (optional; enable if you actually use vector memory)
+chromadb>=0.5.5
+sentence-transformers>=3.0.1
+
+# Web dashboard (optional; enable if you serve a UI)
+flask>=3.0.0
+flask-socketio>=5.3.6
+eventlet>=0.36.1

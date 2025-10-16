@@ -1,0 +1,17 @@
+black==24.8.0
+eventlet==0.36.1
+flask==3.0.3
+flask-socketio==5.3.6
+isort==5.13.2
+MetaTrader5==5.0.45
+numpy==1.26.4
+pandas==2.2.3
+PyYAML==6.0.2
+python-dotenv==1.0.1
+pydantic==2.9.2
+requests==2.32.3
+ruff==0.6.8
+ta==0.10.2
+chromadb==0.5.5
+sentence-transformers==3.0.1
+pytest==8.3.3
