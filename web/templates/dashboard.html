@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lolo Trading Agent - Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Lolo Trading Agent</h1>
+            <div class="status-indicator" id="status-indicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="controls">
+            <button id="btn-start" class="btn btn-success">▶ Start Trading</button>
+            <button id="btn-stop" class="btn btn-warning">⏸ Stop Trading</button>
+            <button id="btn-emergency" class="btn btn-danger">🛑 Emergency Stop</button>
+        </div>
+
+        <div class="dashboard-grid">
+            <!-- Account Info -->
+            <div class="card">
+                <h2>Account Information</h2>
+                <div class="account-info">
+                    <div class="info-item">
+                        <span class="label">Balance:</span>
+                        <span class="value" id="balance">$0.00</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Equity:</span>
+                        <span class="value" id="equity">$0.00</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Profit:</span>
+                        <span class="value profit" id="profit">$0.00</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Margin Level:</span>
+                        <span class="value" id="margin-level">0%</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Performance Metrics -->
+            <div class="card">
+                <h2>Performance</h2>
+                <div class="performance-metrics">
+                    <div class="metric">
+                        <div class="metric-value" id="total-trades">0</div>
+                        <div class="metric-label">Total Trades</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="win-rate">0%</div>
+                        <div class="metric-label">Win Rate</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value profit" id="total-profit">$0</div>
+                        <div class="metric-label">Total Profit</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Open Positions -->
+            <div class="card full-width">
+                <h2>Open Positions (<span id="positions-count">0</span>)</h2>
+                <div class="table-container">
+                    <table id="positions-table">
+                        <thead>
+                            <tr>
+                                <th>Ticket</th>
+                                <th>Symbol</th>
+                                <th>Type</th>
+                                <th>Volume</th>
+                                <th>Open Price</th>
+                                <th>Current Price</th>
+                                <th>Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-tbody">
+                            <tr>
+                                <td colspan="7" class="no-data">No open positions</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Recent Trades -->
+            <div class="card full-width">
+                <h2>Recent Trades</h2>
+                <div class="table-container">
+                    <table id="trades-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Type</th>
+                                <th>Volume</th>
+                                <th>Entry</th>
+                                <th>Exit</th>
+                                <th>Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-tbody">
+                            <tr>
+                                <td colspan="7" class="no-data">No recent trades</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Learning Insights -->
+            <div class="card full-width">
+                <h2>💡 Learning Insights</h2>
+                <div id="insights-container" class="insights-container">
+                    <p class="no-data">No insights available</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
+
